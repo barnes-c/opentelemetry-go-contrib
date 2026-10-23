@@ -48,7 +48,7 @@ func meterProvider(cfg configOptions, res *resource.Resource) (metric.MeterProvi
 
 	var errs []error
 	for _, reader := range cfg.opentelemetryConfig.MeterProvider.Readers {
-		r, err := metricReader(cfg.ctx, reader)
+		r, err := metricReader(cfg.ctx, reader, cfg.prometheusRegisterer)
 		if err == nil {
 			opts = append(opts, sdkmetric.WithReader(r))
 		} else {
@@ -72,7 +72,7 @@ func meterProvider(cfg configOptions, res *resource.Resource) (metric.MeterProvi
 	return mp, mp.Shutdown, nil
 }
 
-func metricReader(ctx context.Context, r MetricReader) (sdkmetric.Reader, error) {
+func metricReader(ctx context.Context, r MetricReader, promRegisterer prometheus.Registerer) (sdkmetric.Reader, error) {
 	if r.Periodic != nil && r.Pull != nil {
 		return nil, newErrInvalid("must not specify multiple metric reader type")
 	}
@@ -94,7 +94,7 @@ func metricReader(ctx context.Context, r MetricReader) (sdkmetric.Reader, error)
 	}
 
 	if r.Pull != nil {
-		return pullReader(ctx, r.Pull.Exporter)
+		return pullReader(ctx, r.Pull.Exporter, promRegisterer)
 	}
 	return nil, newErrInvalid("no valid metric reader")
 }
@@ -142,8 +142,11 @@ func cardinalityLimitSelector(cl *CardinalityLimits) sdkmetric.CardinalityLimitS
 	}
 }
 
-func pullReader(ctx context.Context, exporter PullMetricExporter) (sdkmetric.Reader, error) {
+func pullReader(ctx context.Context, exporter PullMetricExporter, promRegisterer prometheus.Registerer) (sdkmetric.Reader, error) {
 	if exporter.PrometheusDevelopment != nil {
+		if promRegisterer != nil {
+			return prometheusRegistererReader(exporter.PrometheusDevelopment, promRegisterer)
+		}
 		return prometheusReader(ctx, exporter.PrometheusDevelopment)
 	}
 	return nil, newErrInvalid("no valid metric exporter")
@@ -454,6 +457,20 @@ func prometheusReader(ctx context.Context, prometheusConfig *ExperimentalPrometh
 	}()
 
 	return readerWithServer{reader, &server}, nil
+}
+
+func prometheusRegistererReader(prometheusConfig *ExperimentalPrometheusMetricExporter, registerer prometheus.Registerer) (sdkmetric.Reader, error) {
+	opts, err := prometheusReaderOpts(prometheusConfig)
+	if err != nil {
+		return nil, err
+	}
+	opts = append(opts, otelprom.WithRegisterer(registerer))
+
+	reader, err := otelprom.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating otel prometheus exporter: %w", err)
+	}
+	return reader, nil
 }
 
 func validTranslationStrategy(strategy ExperimentalPrometheusTranslationStrategy) bool {

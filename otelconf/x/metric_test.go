@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -953,7 +954,7 @@ func TestReader(t *testing.T) {
 	}
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := metricReader(t.Context(), tt.reader)
+			got, err := metricReader(t.Context(), tt.reader, nil)
 			require.ErrorIs(t, err, tt.wantErrT)
 			if tt.wantReader == nil {
 				require.Nil(t, got)
@@ -1071,7 +1072,7 @@ func TestMetricReaderCardinalityLimitsWired(t *testing.T) {
 				Console: &ConsoleMetricExporter{},
 			},
 		},
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -1655,6 +1656,57 @@ func TestPrometheusIPv6(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 		})
 	}
+}
+
+func TestPrometheusRegisterer(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	sdk, err := NewSDK(
+		WithPrometheusRegisterer(reg),
+		WithOpenTelemetryConfiguration(OpenTelemetryConfiguration{
+			MeterProvider: &MeterProvider{
+				Readers: []MetricReader{{
+					Pull: &PullMetricReader{
+						Exporter: PullMetricExporter{
+							// No host or port: they are not needed when the caller serves the registry.
+							PrometheusDevelopment: &ExperimentalPrometheusMetricExporter{
+								WithoutScopeInfo: new(true),
+							},
+						},
+					},
+				}},
+			},
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		//nolint:usetesting // required to avoid getting a canceled context at cleanup.
+		require.NoError(t, sdk.Shutdown(context.Background()))
+	})
+
+	counter, err := sdk.MeterProvider().Meter("test").Int64Counter("registerer.test")
+	require.NoError(t, err)
+	counter.Add(t.Context(), 1)
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var names []string
+	for _, f := range families {
+		names = append(names, f.GetName())
+	}
+	assert.Contains(t, names, "registerer_test_total")
+}
+
+func TestPrometheusRegistererInvalidStrategy(t *testing.T) {
+	_, err := metricReader(t.Context(), MetricReader{
+		Pull: &PullMetricReader{
+			Exporter: PullMetricExporter{
+				PrometheusDevelopment: &ExperimentalPrometheusMetricExporter{
+					TranslationStrategy: new(ExperimentalPrometheusTranslationStrategy("invalid")),
+				},
+			},
+		},
+	}, prometheus.NewRegistry())
+	require.ErrorIs(t, err, newErrInvalid("translation strategy invalid"))
 }
 
 func Test_otlpGRPCMetricExporter(t *testing.T) {
